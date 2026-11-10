@@ -44,6 +44,11 @@
 #   INERT - not a genuine primary home (a crewmate/scout task worktree or a
 #           non-firstmate repo): exit 0 with no output, exactly like ALLOW.
 #   ESCAPE - FM_ALLOW_SUBAGENT=1 in the environment allows deliberately.
+#   HOME ALLOW - the home's untracked config/subagent-allow lists what this
+#           primary may use: "agent-type <type>" allows the harness agent tool
+#           for exactly that subagent type (stdin transport only, read from
+#           .tool_input.subagent_type), and "tool <Name>" allows one other
+#           delegation-shaped tool by exact name. With no file, nothing changes.
 #   FAIL OPEN - malformed or empty stdin, or missing jq for stdin transport.
 #
 # Claude requires stdout to remain empty on deny.
@@ -80,6 +85,7 @@ PLAN_ONLY_TOOLS='taskcreate taskupdate'
 
 TOOL=""
 TOOL_SET=0
+PAYLOAD=""
 CLAUDE_MODE=0
 AGY_MODE=0
 
@@ -102,6 +108,8 @@ delegation tools is legitimate.
 Exits 0 to allow and 2 to deny, naming the real crewmate dispatch path instead.
 With --agy, exits 0 on deny and emits a JSON decision object on stdout.
 Set FM_ALLOW_SUBAGENT=1 in the session environment to allow deliberately.
+A home's untracked config/subagent-allow may allow the agent tool for named
+subagent types ("agent-type <type>") and single tools ("tool <Name>").
 Malformed transport fails open.
 EOF
 }
@@ -191,6 +199,49 @@ STATE=${FM_STATE_OVERRIDE:-$FM_HOME/state}
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
+
+# A home may allow part of the harness delegation surface for its own primary.
+# The file is untracked per-home configuration, like the local deny list, so a
+# linked task worktree never inherits it. It exists for work that returns
+# within the turn and ships nothing - a fork of the primary's own conversation
+# reading, checking, or drafting - while anything that ships or must outlive
+# the session still goes through bin/fm-spawn.sh. Two line shapes are read and
+# every other line is ignored, so a malformed file allows nothing:
+#   agent-type <type>   allow the agent tool (Agent, or its older name Task)
+#                       when the payload's .tool_input.subagent_type is exactly
+#                       <type>. --tool transport carries no subagent type, so
+#                       it never matches.
+#   tool <Name>         allow one delegation-shaped tool by exact name. The
+#                       agent tool itself cannot be listed this way, so no line
+#                       can allow every subagent type at once.
+ALLOW_FILE=$FM_HOME/config/subagent-allow
+if [ -f "$ALLOW_FILE" ]; then
+  SUBAGENT_TYPE=""
+  case "$NORMALIZED" in
+    agent|task)
+      if [ -n "$PAYLOAD" ] && command -v jq >/dev/null 2>&1; then
+        SUBAGENT_TYPE=$(printf '%s' "$PAYLOAD" | jq -r '(.tool_input.subagent_type // empty) | if type == "string" then . else empty end' 2>/dev/null) || SUBAGENT_TYPE=""
+      fi
+      ;;
+  esac
+  set -f  # an allow line is split into words, never expanded as a glob
+  while IFS= read -r allow_line || [ -n "$allow_line" ]; do
+    # shellcheck disable=SC2086
+    set -- $allow_line
+    [ "$#" -eq 2 ] || continue
+    case "$1" in
+      agent-type)
+        [ -n "$SUBAGENT_TYPE" ] && [ "$SUBAGENT_TYPE" = "$2" ] && exit 0
+        ;;
+      tool)
+        allow_norm=$(LC_ALL=C printf '%s' "$2" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9')
+        case "$allow_norm" in agent|task) continue ;; esac
+        [ "$NORMALIZED" = "$allow_norm" ] && exit 0
+        ;;
+    esac
+  done < "$ALLOW_FILE"
+  set +f
+fi
 
 # Name the dedicated scout entry point only when this home carries it; degrade
 # to the two-step brief-then-spawn path when it does not, rather than naming a

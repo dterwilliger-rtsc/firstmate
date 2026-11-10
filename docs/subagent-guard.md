@@ -34,6 +34,29 @@ The scope line is therefore: wrong tool reached for, deny; wrong amount of think
 The guard is also not a dispatch-quality check.
 It says nothing about whether the resulting brief, project, or delivery mode is correct.
 
+## Per-home allow file
+
+A home may allow part of the delegation surface for its own primary in an untracked file, `config/subagent-allow`.
+With no file the guard behaves exactly as described in the rest of this document.
+The file is per-home configuration, like the local deny list, so a linked task worktree never inherits it.
+
+It exists for work that returns within the turn and ships nothing, such as a fork of the primary's own conversation that reads, checks, or drafts.
+Work that ships, or that must outlive the session, still goes through `bin/fm-spawn.sh`, and none of the costs under "Why this exists" are removed for anything the file allows: such work has no fleet record and dies with the session.
+
+Two line shapes are read, and every other line is ignored, so a malformed file allows nothing.
+
+```text
+agent-type fork
+tool SendMessage
+```
+
+- `agent-type <type>` allows the agent tool (`Agent`, or its older name `Task`) only when the PreToolUse payload's `.tool_input.subagent_type` is exactly `<type>`.
+  The `--tool` transport carries no subagent type, so it never matches.
+- `tool <Name>` allows one delegation-shaped tool by exact normalized name.
+  The agent tool itself cannot be listed this way, so no line allows every subagent type at once.
+
+A Claude home that uses this file must also leave the allowed tools out of its local `permissions.deny` list, because that list removes a tool before this hook runs.
+
 ## Shipped mechanism
 
 `bin/fm-subagent-pretool-check.sh` is the shipped layer.

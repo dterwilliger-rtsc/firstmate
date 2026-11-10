@@ -276,6 +276,68 @@ test_missing_jq_stdin_transport_fails_open() {
   pass "missing jq for stdin transport fails open rather than denying every tool call"
 }
 
+run_payload() {
+  local payload=$1 rc=0
+  : > "$OUT"
+  : > "$ERR"
+  printf '%s' "$payload" \
+    | env FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$STATE" \
+      "$CHECK" --claude > "$OUT" 2> "$ERR" || rc=$?
+  return "$rc"
+}
+
+expect_payload_rc() {
+  local label=$1 want=$2 payload=$3 rc=0
+  run_payload "$payload" || rc=$?
+  [ "$rc" -eq "$want" ] || fail "$label must exit $want, got $rc: $(cat "$ERR")"
+  if [ "$want" -eq 0 ]; then
+    [ ! -s "$OUT" ] || fail "$label allow wrote stdout: $(cat "$OUT")"
+    [ ! -s "$ERR" ] || fail "$label allow wrote stderr: $(cat "$ERR")"
+  fi
+}
+
+test_home_allow_file_allows_only_what_it_names() {
+  local allow="$PRIMARY/config/subagent-allow" rc=0
+  mkdir -p "$PRIMARY/config"
+  rm -f "$allow"
+
+  expect_payload_rc "fork with no allow file" 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"fork"}}'
+
+  printf '# what this home allows\nagent-type fork\ntool SendMessage\n' > "$allow"
+  expect_payload_rc "allowed fork" 0 '{"tool_name":"Agent","tool_input":{"subagent_type":"fork","prompt":"x"}}'
+  expect_payload_rc "allowed fork under the older tool name" 0 '{"tool_name":"Task","tool_input":{"subagent_type":"fork"}}'
+  expect_payload_rc "another subagent type" 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"general-purpose"}}'
+  expect_payload_rc "a type that only contains the allowed one" 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"forked"}}'
+  expect_payload_rc "a differently cased type" 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"Fork"}}'
+  expect_payload_rc "no subagent type" 2 '{"tool_name":"Agent","tool_input":{"prompt":"x"}}'
+  expect_payload_rc "no tool input" 2 '{"tool_name":"Agent"}'
+  expect_payload_rc "a non-string subagent type" 2 '{"tool_name":"Agent","tool_input":{"subagent_type":["fork"]}}'
+  expect_payload_rc "allowed tool by name" 0 '{"tool_name":"SendMessage","tool_input":{}}'
+  expect_payload_rc "a tool the file does not name" 2 '{"tool_name":"Workflow","tool_input":{"subagent_type":"fork"}}'
+  expect_payload_rc "a tool that only contains an allowed name" 2 '{"tool_name":"SendMessageAgent","tool_input":{}}'
+  expect_payload_rc "a scheduling tool" 2 '{"tool_name":"CronCreate","tool_input":{}}'
+
+  run_tool Agent || rc=$?
+  [ "$rc" -eq 2 ] || fail "--tool transport carries no subagent type and must still deny Agent, got $rc"
+  expect_allow "allowed tool over --tool transport" SendMessage
+
+  printf 'tool Agent\ntool Task\n' > "$allow"
+  expect_payload_rc "the agent tool listed as a plain tool" 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"general-purpose"}}'
+  expect_payload_rc "the older agent tool listed as a plain tool" 2 '{"tool_name":"Task","tool_input":{"subagent_type":"general-purpose"}}'
+
+  printf 'fork\nagent-type\nagent-type fork extra\nallow agent-type fork\n' > "$allow"
+  expect_payload_rc "malformed allow lines" 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"fork"}}'
+
+  : > "$allow"
+  expect_payload_rc "an empty allow file" 2 '{"tool_name":"Agent","tool_input":{"subagent_type":"fork"}}'
+
+  printf 'agent-type fork' > "$allow"
+  expect_payload_rc "a last line with no newline" 0 '{"tool_name":"Agent","tool_input":{"subagent_type":"fork"}}'
+
+  rm -f "$allow"
+  pass "a home allow file allows exactly the subagent types and tools it names, and nothing when absent or malformed"
+}
+
 test_guard_denies_every_currently_known_delegation_tool
 test_guard_denies_hypothetical_future_tools
 test_guard_allows_ordinary_and_observe_only_tools
@@ -289,3 +351,4 @@ test_secondmate_home_is_in_scope
 test_stdin_transports_and_output_shapes
 test_malformed_transport_fails_open
 test_missing_jq_stdin_transport_fails_open
+test_home_allow_file_allows_only_what_it_names
